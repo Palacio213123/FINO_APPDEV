@@ -1,0 +1,12 @@
+
+[functions.parse-receipt]
+enabled = true
+verify_jwt = true
+import_map = "./functions/parse-receipt/deno.json"
+entrypoint = "./functions/parse-receipt/index.ts"
+
+[functions.split-receipt]
+enabled = true
+verify_jwt = false
+import_map = "./functions/split-receipt/deno.json"
+entrypoint = "./functions/split-receipt/index.ts"
