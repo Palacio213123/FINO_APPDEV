@@ -37,6 +37,8 @@ const ChatScreen = lazy(() => import('../screens/ChatScreen'));
 const BillSplitterScreen = lazy(() => import('../screens/BillSplitterScreen'));
 const UtangTrackerScreen = lazy(() => import('../screens/UtangTrackerScreen'));
 const SavingsGoalScreen = lazy(() => import('../screens/SavingsGoalScreen'));
+// Lazy load the rotating group savings coordinator modal
+const PaluwagScreen = lazy(() => import('../screens/PaluwagScreen'));
 const FinancialEducationScreen = lazy(
   () => import('../screens/FinancialEducationScreen')
 );
@@ -156,6 +158,7 @@ export type RootStackParamList = {
     | { name?: string; target?: number; monthlyContribution?: number }
     | undefined;
   FinancialEducation: undefined;
+  Paluwag: undefined;
   RecurringIncome: undefined;
   RecurringBills: undefined;
   CashFlow: { accountId?: string } | undefined;
@@ -411,6 +414,11 @@ export default function RootNavigator() {
               <Stack.Screen
                 name="FinancialEducation"
                 component={FinancialEducationScreen}
+                options={{ headerShown: false, presentation: 'modal' }}
+              />
+              <Stack.Screen
+                name="Paluwag"
+                component={PaluwagScreen}
                 options={{ headerShown: false, presentation: 'modal' }}
               />
               <Stack.Screen

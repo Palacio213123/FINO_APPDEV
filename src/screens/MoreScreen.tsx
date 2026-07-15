@@ -68,7 +68,10 @@ const ACCOUNT_COLORS = [
 
 // Mirror of the AccountsScreen category list — kept in sync manually since
 // this legacy modal is still mounted in ProfileSidebar.
-const ACCOUNT_CATEGORIES: { key: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+const ACCOUNT_CATEGORIES: {
+  key: string;
+  icon: keyof typeof Ionicons.glyphMap;
+}[] = [
   { key: 'E-Wallet', icon: 'phone-portrait-outline' },
   { key: 'Bank', icon: 'business-outline' },
   { key: 'Cash', icon: 'cash-outline' },
@@ -114,7 +117,7 @@ export function AddAccountModal({
   const [balance, setBalance] = useState('');
   const [selectedColor, setSelectedColor] = useState(ACCOUNT_COLORS[0]);
   const [selectedCategory, setSelectedCategory] = useState(
-    ACCOUNT_CATEGORIES[0].key,
+    ACCOUNT_CATEGORIES[0].key
   );
   const [saving, setSaving] = useState(false);
   const { currentUserId } = useAuth();
@@ -206,7 +209,9 @@ export function AddAccountModal({
               {getCanonicalBrandName(name.trim()) && (
                 <View style={addAccStyles.brandBadge}>
                   <Ionicons name="checkmark-circle" size={13} color="#2d6a4f" />
-                  <Text style={addAccStyles.brandBadgeText}>Stylized card applied</Text>
+                  <Text style={addAccStyles.brandBadgeText}>
+                    Stylized card applied
+                  </Text>
                 </View>
               )}
               <Text style={addAccStyles.previewBalance}>
@@ -984,6 +989,7 @@ function MoreScreen() {
     else if (id === 'settings') navigation.navigate('Settings');
     else if (id === 'splitter') navigation.navigate('BillSplitter');
     else if (id === 'utang') navigation.navigate('UtangTracker');
+    else if (id === 'paluwag') navigation.navigate('Paluwag');
     else if (id === 'savings') navigation.navigate('SavingsGoal');
     else if (id === 'education') navigation.navigate('FinancialEducation');
   };
@@ -1036,6 +1042,14 @@ function MoreScreen() {
       icon: 'cash',
       color: '#10B981',
       bg: isDark ? '#0D2E23' : '#ECFDF5',
+    },
+    {
+      id: 'paluwag',
+      label: 'Paluwag Coordinator',
+      desc: 'Track group rotating savings cycles',
+      icon: 'sync',
+      color: '#EC4899',
+      bg: isDark ? '#2E0B1A' : '#FDF2F8',
     },
     {
       id: 'savings',
@@ -1127,18 +1141,25 @@ function MoreScreen() {
             />
           </TouchableOpacity>
         </View>
-        <View style={toolsView === 'grid' ? styles.toolsGridWrap : styles.toolsGrid}>
+        <View
+          style={toolsView === 'grid' ? styles.toolsGridWrap : styles.toolsGrid}
+        >
           {otherTools.map((tool) => {
             const isRecurring = tool.id === 'recurring';
             if (toolsView === 'grid') {
               return (
                 <TouchableOpacity
                   key={tool.id}
-                  style={[styles.toolTileGrid, { backgroundColor: colors.white }]}
+                  style={[
+                    styles.toolTileGrid,
+                    { backgroundColor: colors.white },
+                  ]}
                   onPress={() => handleToolPress(tool.id)}
                   activeOpacity={0.75}
                 >
-                  <View style={[styles.toolIconBox, { backgroundColor: tool.bg }]}>
+                  <View
+                    style={[styles.toolIconBox, { backgroundColor: tool.bg }]}
+                  >
                     <Ionicons
                       name={tool.icon as any}
                       size={22}
@@ -1161,7 +1182,9 @@ function MoreScreen() {
                   onPress={() => handleToolPress(tool.id)}
                   activeOpacity={0.75}
                 >
-                  <View style={[styles.toolIconBox, { backgroundColor: tool.bg }]}>
+                  <View
+                    style={[styles.toolIconBox, { backgroundColor: tool.bg }]}
+                  >
                     <Ionicons
                       name={tool.icon as any}
                       size={22}
@@ -1251,11 +1274,7 @@ function MoreScreen() {
                           },
                         ]}
                       >
-                        <Ionicons
-                          name="receipt"
-                          size={18}
-                          color="#7A4AB8"
-                        />
+                        <Ionicons name="receipt" size={18} color="#7A4AB8" />
                       </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.recurringRowName}>
