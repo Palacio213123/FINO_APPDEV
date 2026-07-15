@@ -1,0 +1,1071 @@
+import { Q } from '@nozbe/watermelondb';
+import * as Crypto from 'expo-crypto';
+
+import { database } from '../db';
+import type AccountModel from '../db/models/Account';
+import type TransactionModel from '../db/models/Transaction';
+import type CategoryModel from '../db/models/Category';
+import type DebtModel from '../db/models/Debt';
+import type SavingsGoalModel from '../db/models/SavingsGoal';
+import type BillReminderModel from '../db/models/BillReminder';
+import type MerchantMappingModel from '../db/models/MerchantMapping';
+import type RecurringIncomeModel from '../db/models/RecurringIncome';
+import type RecurringBillModel from '../db/models/RecurringBill';
+import { triggerSync } from './watermelonSync';
+import {
+  scheduleReconcile,
+  cancelScheduledForEntity,
+} from './localPushScheduler';
+import { STARTER_EXPENSE_CATEGORIES } from '../constants/categoryMappings';
+
+const accounts = () => database.get<AccountModel>('accounts');
+const transactions = () => database.get<TransactionModel>('transactions');
+const categories = () => database.get<CategoryModel>('categories');
+const debts = () => database.get<DebtModel>('debts');
+const savingsGoals = () => database.get<SavingsGoalModel>('savings_goals');
+const billReminders = () => database.get<BillReminderModel>('bill_reminders');
+const merchantMappings = () =>
+  database.get<MerchantMappingModel>('merchant_mappings');
+const recurringIncomes = () =>
+  database.get<RecurringIncomeModel>('recurring_incomes');
+const recurringBills = () =>
+  database.get<RecurringBillModel>('recurring_bills');
+
+function uuidv4(): string {
+  return Crypto.randomUUID();
+}
+
+/**
+ * Round to two decimal places. Server stores money as DECIMAL(12,2); JS uses
+ * binary floats, so cumulative balance adjustments (`balance + delta`) drift
+ * over time without rounding. Apply on every write.
+ */
+function toCents(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// Local contract (see watermelonSync.ts): `date` columns must be 'YYYY-MM-DD'
+// so Q.where range comparisons against day literals work. Callers commonly
+// pass a full ISO timestamp — slice it to the day part. If they passed a
+// day-only string, return it unchanged.
+function toDayString(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value.slice(0, 10);
+}
+
+/** Fire-and-forget sync — never blocks the caller's UI. */
+function syncInBackground(): void {
+  triggerSync().catch((err) => {
+    if (__DEV__)
+      console.warn('[localMutations] background sync failed:', err?.message);
+  });
+}
+
+export type NewTransactionInput = {
+  userId: string;
+  accountId: string;
+  amount: number;
+  type: 'expense' | 'income';
+  category?: string | null;
+  merchantName?: string | null;
+  displayName?: string | null;
+  transactionNote?: string | null;
+  signalSource?: 'description' | 'merchant' | 'time_history' | 'manual' | null;
+  date: string;
+  receiptUrl?: string | null;
+  merchantConfidence?: number | null;
+  amountConfidence?: number | null;
+  dateConfidence?: number | null;
+  /** Pre-supplied id lets optimistic UI reference the future row immediately. */
+  id?: string;
+};
+
+/**
+ * Creates a transaction and atomically adjusts the source account's balance.
+ * Both writes happen inside a single WatermelonDB batch — if the process is
+ * killed mid-write SQLite rolls back cleanly.
+ */
+export async function createTransaction(
+  input: NewTransactionInput
+): Promise<string> {
+  const txId = input.id ?? uuidv4();
+  const amount = toCents(input.amount);
+  await database.write(async () => {
+    const account = await accounts().find(input.accountId);
+    const delta = input.type === 'expense' ? -amount : amount;
+
+    const txPrepared = transactions().prepareCreate((tx) => {
+      tx._raw.id = txId;
+      tx.userId = input.userId;
+      tx.accountId = input.accountId;
+      tx.amount = amount;
+      tx.type = input.type;
+      tx.category = input.category ?? undefined;
+      tx.merchantName = input.merchantName ?? undefined;
+      tx.displayName = input.displayName ?? undefined;
+      tx.transactionNote = input.transactionNote ?? undefined;
+      tx.signalSource = input.signalSource ?? undefined;
+      tx.date = toDayString(input.date);
+      tx.transactionDatetime = input.date;
+      tx.receiptUrl = input.receiptUrl ?? undefined;
+      tx.accountDeleted = false;
+      tx.merchantConfidence = input.merchantConfidence ?? undefined;
+      tx.amountConfidence = input.amountConfidence ?? undefined;
+      tx.dateConfidence = input.dateConfidence ?? undefined;
+    });
+
+    const accountPrepared = account.prepareUpdate((a) => {
+      a.balance = toCents(a.balance + delta);
+    });
+
+    await database.batch(txPrepared, accountPrepared);
+  });
+
+  syncInBackground();
+  return txId;
+}
+
+export type UpdateTransactionPatch = {
+  displayName?: string | null;
+  transactionNote?: string | null;
+  category?: string | null;
+  merchantName?: string | null;
+  accountId?: string;
+  date?: string;
+  amount?: number;
+  type?: 'expense' | 'income';
+};
+
+/**
+ * Updates a transaction and, when amount/type/account changes, rebalances the
+ * affected account(s) inside the same write so no intermediate state is ever
+ * visible.
+ */
+export async function updateTransaction(
+  transactionId: string,
+  patch: UpdateTransactionPatch
+): Promise<void> {
+  await database.write(async () => {
+    const tx = await transactions().find(transactionId);
+    const prevAmount = tx.amount;
+    const prevType = tx.type as 'expense' | 'income';
+    const prevAccountId = tx.accountId;
+
+    const nextAmount = toCents(patch.amount ?? prevAmount);
+    const nextType = patch.type ?? prevType;
+    const nextAccountId = patch.accountId ?? prevAccountId;
+
+    const balanceMutations = [];
+    const reverseDelta = prevType === 'expense' ? prevAmount : -prevAmount;
+    const forwardDelta = nextType === 'expense' ? -nextAmount : nextAmount;
+
+    if (!tx.accountDeleted) {
+      if (prevAccountId === nextAccountId) {
+        const net = reverseDelta + forwardDelta;
+        if (net !== 0) {
+          const acc = await accounts().find(prevAccountId);
+          balanceMutations.push(
+            acc.prepareUpdate((a) => {
+              a.balance = toCents(a.balance + net);
+            })
+          );
+        }
+      } else {
+        const oldAcc = await accounts().find(prevAccountId);
+        const newAcc = await accounts().find(nextAccountId);
+        balanceMutations.push(
+          oldAcc.prepareUpdate((a) => {
+            a.balance = toCents(a.balance + reverseDelta);
+          }),
+          newAcc.prepareUpdate((a) => {
+            a.balance = toCents(a.balance + forwardDelta);
+          })
+        );
+      }
+    }
+
+    const txUpdate = tx.prepareUpdate((t) => {
+      if (patch.displayName !== undefined)
+        t.displayName = patch.displayName ?? undefined;
+      if (patch.transactionNote !== undefined)
+        t.transactionNote = patch.transactionNote ?? undefined;
+      if (patch.category !== undefined)
+        t.category = patch.category ?? undefined;
+      if (patch.merchantName !== undefined)
+        t.merchantName = patch.merchantName ?? undefined;
+      if (patch.accountId !== undefined) t.accountId = patch.accountId;
+      if (patch.date !== undefined) {
+        t.date = toDayString(patch.date);
+        t.transactionDatetime = patch.date;
+      }
+      if (patch.amount !== undefined) t.amount = nextAmount;
+      if (patch.type !== undefined) t.type = patch.type;
+    });
+
+    await database.batch(txUpdate, ...balanceMutations);
+  });
+
+  syncInBackground();
+}
+
+export async function deleteTransaction(transactionId: string): Promise<void> {
+  await database.write(async () => {
+    const tx = await transactions().find(transactionId);
+    const account = await accounts().find(tx.accountId);
+    const reverseDelta = tx.type === 'expense' ? tx.amount : -tx.amount;
+
+    const accountPrepared = account.prepareUpdate((a) => {
+      a.balance = toCents(a.balance + reverseDelta);
+    });
+    const txPrepared = tx.prepareMarkAsDeleted();
+
+    await database.batch(accountPrepared, txPrepared);
+  });
+
+  syncInBackground();
+}
+
+export async function saveAdjustment(params: {
+  userId: string;
+  accountId: string;
+  currentBalance: number;
+  newBalance: number;
+  note: string;
+}): Promise<void> {
+  const diff = toCents(params.newBalance - params.currentBalance);
+  if (diff === 0) return;
+  const today = new Date().toISOString();
+  const newBalance = toCents(params.newBalance);
+
+  await database.write(async () => {
+    const account = await accounts().find(params.accountId);
+    const txPrepared = transactions().prepareCreate((tx) => {
+      tx._raw.id = uuidv4();
+      tx.userId = params.userId;
+      tx.accountId = params.accountId;
+      tx.amount = Math.abs(diff);
+      tx.type = diff > 0 ? 'income' : 'expense';
+      tx.category = 'adjustment';
+      tx.displayName = params.note || 'Balance Reconciliation';
+      tx.transactionNote = params.note || undefined;
+      tx.date = toDayString(today);
+      tx.transactionDatetime = today;
+      tx.accountDeleted = false;
+    });
+    const accountPrepared = account.prepareUpdate((a) => {
+      a.balance = newBalance;
+      a.lastReconciledAt = new Date().toISOString();
+    });
+    await database.batch(txPrepared, accountPrepared);
+  });
+
+  syncInBackground();
+}
+
+export async function saveTransfer(params: {
+  userId: string;
+  sourceAccountId: string;
+  sourceAccountName: string;
+  destAccountId: string;
+  destAccountName: string;
+  amount: number;
+}): Promise<void> {
+  const today = new Date().toISOString();
+  const amount = toCents(params.amount);
+
+  await database.write(async () => {
+    const source = await accounts().find(params.sourceAccountId);
+    const dest = await accounts().find(params.destAccountId);
+
+    const outTx = transactions().prepareCreate((tx) => {
+      tx._raw.id = uuidv4();
+      tx.userId = params.userId;
+      tx.accountId = params.sourceAccountId;
+      tx.amount = amount;
+      tx.type = 'expense';
+      tx.category = 'transfer';
+      tx.displayName = `Transfer to ${params.destAccountName}`;
+      tx.date = toDayString(today);
+      tx.transactionDatetime = today;
+      tx.accountDeleted = false;
+      tx.isTransfer = true;
+    });
+    const inTx = transactions().prepareCreate((tx) => {
+      tx._raw.id = uuidv4();
+      tx.userId = params.userId;
+      tx.accountId = params.destAccountId;
+      tx.amount = amount;
+      tx.type = 'income';
+      tx.category = 'transfer';
+      tx.displayName = `Transfer from ${params.sourceAccountName}`;
+      tx.date = toDayString(today);
+      tx.transactionDatetime = today;
+      tx.accountDeleted = false;
+      tx.isTransfer = true;
+    });
+    const sourceUpdate = source.prepareUpdate((a) => {
+      a.balance = toCents(a.balance - amount);
+    });
+    const destUpdate = dest.prepareUpdate((a) => {
+      a.balance = toCents(a.balance + amount);
+    });
+
+    await database.batch(outTx, inTx, sourceUpdate, destUpdate);
+  });
+
+  syncInBackground();
+}
+
+export async function updateAccount(
+  accountId: string,
+  patch: Partial<
+    Pick<
+      AccountModel,
+      'name' | 'type' | 'brandColour' | 'letterAvatar' | 'sortOrder'
+    >
+  >
+): Promise<void> {
+  await database.write(async () => {
+    const acc = await accounts().find(accountId);
+    await acc.update((a) => {
+      if (patch.name !== undefined) a.name = patch.name;
+      if (patch.type !== undefined) a.type = patch.type;
+      if (patch.brandColour !== undefined) a.brandColour = patch.brandColour;
+      if (patch.letterAvatar !== undefined) a.letterAvatar = patch.letterAvatar;
+      if (patch.sortOrder !== undefined) a.sortOrder = patch.sortOrder;
+    });
+  });
+  syncInBackground();
+}
+
+export async function createAccount(input: {
+  userId: string;
+  name: string;
+  type: string;
+  brandColour: string;
+  letterAvatar: string;
+  startingBalance: number;
+  sortOrder?: number;
+  /**
+   * The mandatory default "Cash" account is non-deletable (mirrors the server
+   * `seed_user_defaults` trigger). User-created accounts pass true (the default).
+   */
+  isDeletable?: boolean;
+}): Promise<string> {
+  const id = uuidv4();
+  await database.write(async () => {
+    await accounts().create((a) => {
+      a._raw.id = id;
+      a.userId = input.userId;
+      a.name = input.name;
+      a.type = input.type;
+      a.brandColour = input.brandColour;
+      a.letterAvatar = input.letterAvatar;
+      a.balance = toCents(input.startingBalance);
+      a.startingBalance = toCents(input.startingBalance);
+      a.isActive = true;
+      a.isDeletable = input.isDeletable ?? true;
+      a.sortOrder = input.sortOrder ?? 0;
+    });
+  });
+  syncInBackground();
+  return id;
+}
+
+export async function deleteAccount(accountId: string): Promise<void> {
+  await database.write(async () => {
+    const acc = await accounts().find(accountId);
+    const relatedTxs = await transactions()
+      .query(Q.where('user_id', acc.userId), Q.where('account_id', accountId))
+      .fetch();
+
+    const accountDelete = acc.prepareMarkAsDeleted();
+    const txUpdates = relatedTxs.map((tx) =>
+      tx.prepareUpdate((t) => {
+        t.accountDeleted = true;
+      })
+    );
+
+    await database.batch(accountDelete, ...txUpdates);
+  });
+  syncInBackground();
+}
+
+export async function createCategory(input: {
+  userId: string;
+  name: string;
+  categoryType: 'expense' | 'income';
+  emoji?: string;
+  tileBgColour?: string;
+  textColour?: string;
+  budgetLimit?: number;
+  sortOrder?: number;
+  /**
+   * Reserved for the mandatory catch-all "Others" row that auto-categorization
+   * falls back to. `is_default: true` is what gates rename and delete on the
+   * client. User-created rows always pass `false` (the default).
+   */
+  isDefault?: boolean;
+}): Promise<string> {
+  const id = uuidv4();
+  await database.write(async () => {
+    await categories().create((c) => {
+      c._raw.id = id;
+      c.userId = input.userId;
+      c.name = input.name;
+      c.categoryType = input.categoryType;
+      c.emoji = input.emoji;
+      c.tileBgColour = input.tileBgColour;
+      c.textColour = input.textColour;
+      c.budgetLimit = input.budgetLimit;
+      c.isActive = true;
+      c.isDefault = input.isDefault ?? false;
+      c.sortOrder = input.sortOrder ?? 0;
+    });
+  });
+  syncInBackground();
+  return id;
+}
+
+// Neutral fallback colours for custom-named categories created during
+// onboarding — mirrors the "Others" tile so they look neutral until styled.
+const CUSTOM_CATEGORY_TILE = '#F2EFEC';
+const CUSTOM_CATEGORY_TEXT = '#5C5550';
+
+/**
+ * Seed the local DB with what the server `seed_user_defaults` trigger would
+ * create for a brand-new user, plus the categories chosen during onboarding.
+ * Offline-first: runs against the device-local `userId` with no network. Used
+ * by OnboardingScreen so a never-signed-in user still gets a working setup.
+ *
+ *  - the mandatory non-deletable **Cash** account
+ *  - the mandatory **"Others"** catch-all category (is_default)
+ *  - the selected starter categories + any custom names
+ */
+export async function seedOnboardingDefaults(input: {
+  userId: string;
+  selectedStarterKeys: string[];
+  customCategoryNames: string[];
+  startingCashBalance?: number;
+}): Promise<void> {
+  const {
+    userId,
+    selectedStarterKeys,
+    customCategoryNames,
+    startingCashBalance = 0,
+  } = input;
+
+  await createAccount({
+    userId,
+    name: 'Cash',
+    type: 'Cash',
+    brandColour: '#1C9E4B',
+    letterAvatar: 'P',
+    startingBalance: startingCashBalance,
+    sortOrder: 0,
+    isDeletable: false,
+  });
+
+  await createCategory({
+    userId,
+    name: 'Others',
+    categoryType: 'expense',
+    emoji: 'others',
+    tileBgColour: CUSTOM_CATEGORY_TILE,
+    textColour: CUSTOM_CATEGORY_TEXT,
+    sortOrder: 999,
+    isDefault: true,
+  });
+
+  const selected = new Set(selectedStarterKeys);
+  for (const def of STARTER_EXPENSE_CATEGORIES) {
+    if (!selected.has(def.key)) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await createCategory({
+      userId,
+      name: def.name,
+      categoryType: 'expense',
+      emoji: def.key,
+      tileBgColour: def.tileBg,
+      textColour: def.textColor,
+      sortOrder: def.sortOrder,
+    });
+  }
+
+  let sortOrder = STARTER_EXPENSE_CATEGORIES.length;
+  for (const name of customCategoryNames) {
+    // eslint-disable-next-line no-await-in-loop
+    await createCategory({
+      userId,
+      name,
+      categoryType: 'expense',
+      emoji: 'others',
+      tileBgColour: CUSTOM_CATEGORY_TILE,
+      textColour: CUSTOM_CATEGORY_TEXT,
+      sortOrder: sortOrder++,
+    });
+  }
+}
+
+export async function updateCategory(
+  categoryId: string,
+  patch: Partial<
+    Pick<
+      CategoryModel,
+      | 'name'
+      | 'emoji'
+      | 'tileBgColour'
+      | 'textColour'
+      | 'budgetLimit'
+      | 'isActive'
+      | 'sortOrder'
+      | 'categoryType'
+    >
+  >
+): Promise<void> {
+  await database.write(async () => {
+    const cat = await categories().find(categoryId);
+    await cat.update((c) => {
+      if (patch.name !== undefined) c.name = patch.name;
+      if (patch.emoji !== undefined) c.emoji = patch.emoji;
+      if (patch.tileBgColour !== undefined) c.tileBgColour = patch.tileBgColour;
+      if (patch.textColour !== undefined) c.textColour = patch.textColour;
+      if (patch.budgetLimit !== undefined) c.budgetLimit = patch.budgetLimit;
+      if (patch.isActive !== undefined) c.isActive = patch.isActive;
+      if (patch.sortOrder !== undefined) c.sortOrder = patch.sortOrder;
+      if (patch.categoryType !== undefined) c.categoryType = patch.categoryType;
+    });
+  });
+  syncInBackground();
+}
+
+export async function deleteCategory(categoryId: string): Promise<void> {
+  await database.write(async () => {
+    const cat = await categories().find(categoryId);
+    await cat.markAsDeleted();
+  });
+  syncInBackground();
+}
+
+// Whether a debt is money owed TO the user (a receivable) or money the user
+// owes someone else (a payable). Defaults to 'owed_to_me' to preserve the
+// pre-direction meaning of every existing row.
+export type DebtDirection = 'owed_to_me' | 'i_owe';
+
+export async function createDebt(input: {
+  userId: string;
+  debtorName: string;
+  description?: string;
+  totalAmount: number;
+  amountPaid?: number;
+  direction?: DebtDirection;
+  dueDate?: string;
+}): Promise<string> {
+  const id = uuidv4();
+  await database.write(async () => {
+    await debts().create((d) => {
+      d._raw.id = id;
+      d.userId = input.userId;
+      d.debtorName = input.debtorName;
+      d.description = input.description;
+      d.totalAmount = toCents(input.totalAmount);
+      d.amountPaid = toCents(input.amountPaid ?? 0);
+      d.direction = input.direction ?? 'owed_to_me';
+      d.dueDate = input.dueDate;
+    });
+  });
+  syncInBackground();
+  return id;
+}
+
+export async function updateDebt(
+  debtId: string,
+  patch: Partial<
+    Pick<
+      DebtModel,
+      | 'debtorName'
+      | 'description'
+      | 'totalAmount'
+      | 'amountPaid'
+      | 'direction'
+      | 'dueDate'
+    >
+  >
+): Promise<void> {
+  await database.write(async () => {
+    const d = await debts().find(debtId);
+    await d.update((rec) => {
+      if (patch.debtorName !== undefined) rec.debtorName = patch.debtorName;
+      if (patch.description !== undefined) rec.description = patch.description;
+      if (patch.totalAmount !== undefined)
+        rec.totalAmount = toCents(patch.totalAmount);
+      if (patch.amountPaid !== undefined)
+        rec.amountPaid = toCents(patch.amountPaid);
+      if (patch.direction !== undefined) rec.direction = patch.direction;
+      if (patch.dueDate !== undefined) rec.dueDate = patch.dueDate;
+    });
+  });
+  syncInBackground();
+}
+
+export async function deleteDebt(debtId: string): Promise<void> {
+  await database.write(async () => {
+    const d = await debts().find(debtId);
+    await d.markAsDeleted();
+  });
+  syncInBackground();
+}
+
+export async function createSavingsGoal(input: {
+  userId: string;
+  name: string;
+  description?: string;
+  targetAmount: number;
+  currentAmount?: number;
+  targetDate?: string;
+  icon: string;
+  color: string;
+}): Promise<string> {
+  const id = uuidv4();
+  await database.write(async () => {
+    await savingsGoals().create((g) => {
+      g._raw.id = id;
+      g.userId = input.userId;
+      g.name = input.name;
+      g.description = input.description;
+      g.targetAmount = toCents(input.targetAmount);
+      g.currentAmount = toCents(input.currentAmount ?? 0);
+      g.targetDate = input.targetDate;
+      g.icon = input.icon;
+      g.color = input.color;
+    });
+  });
+  syncInBackground();
+  return id;
+}
+
+export async function updateSavingsGoal(
+  goalId: string,
+  patch: Partial<
+    Pick<
+      SavingsGoalModel,
+      | 'name'
+      | 'description'
+      | 'targetAmount'
+      | 'currentAmount'
+      | 'targetDate'
+      | 'icon'
+      | 'color'
+    >
+  >
+): Promise<void> {
+  await database.write(async () => {
+    const g = await savingsGoals().find(goalId);
+    await g.update((rec) => {
+      if (patch.name !== undefined) rec.name = patch.name;
+      if (patch.description !== undefined) rec.description = patch.description;
+      if (patch.targetAmount !== undefined)
+        rec.targetAmount = toCents(patch.targetAmount);
+      if (patch.currentAmount !== undefined)
+        rec.currentAmount = toCents(patch.currentAmount);
+      if (patch.targetDate !== undefined) rec.targetDate = patch.targetDate;
+      if (patch.icon !== undefined) rec.icon = patch.icon;
+      if (patch.color !== undefined) rec.color = patch.color;
+    });
+  });
+  syncInBackground();
+}
+
+export async function deleteSavingsGoal(goalId: string): Promise<void> {
+  await database.write(async () => {
+    const g = await savingsGoals().find(goalId);
+    await g.markAsDeleted();
+  });
+  syncInBackground();
+}
+
+export async function createBillReminder(input: {
+  userId: string;
+  title: string;
+  amount?: number;
+  merchantName?: string;
+  dueDate: string;
+  isRecurring?: boolean;
+}): Promise<string> {
+  const id = uuidv4();
+  await database.write(async () => {
+    await billReminders().create((b) => {
+      b._raw.id = id;
+      b.userId = input.userId;
+      b.title = input.title;
+      b.amount = input.amount === undefined ? undefined : toCents(input.amount);
+      b.merchantName = input.merchantName;
+      b.dueDate = input.dueDate;
+      b.isRecurring = input.isRecurring ?? false;
+      b.isPaid = false;
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(input.userId);
+  return id;
+}
+
+export async function updateBillReminder(
+  billId: string,
+  patch: Partial<
+    Pick<
+      BillReminderModel,
+      'title' | 'amount' | 'merchantName' | 'dueDate' | 'isRecurring' | 'isPaid'
+    >
+  >
+): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const b = await billReminders().find(billId);
+    userId = b.userId;
+    await b.update((rec) => {
+      if (patch.title !== undefined) rec.title = patch.title;
+      if (patch.amount !== undefined)
+        rec.amount = patch.amount === null ? undefined : toCents(patch.amount);
+      if (patch.merchantName !== undefined)
+        rec.merchantName = patch.merchantName;
+      if (patch.dueDate !== undefined) rec.dueDate = patch.dueDate;
+      if (patch.isRecurring !== undefined) rec.isRecurring = patch.isRecurring;
+      if (patch.isPaid !== undefined) rec.isPaid = patch.isPaid;
+    });
+  });
+  syncInBackground();
+  // Cancel immediately when paid (reconcile would also drop it, but instantly
+  // here); otherwise reschedule against the new due date / hour.
+  if (patch.isPaid) await cancelScheduledForEntity(billId);
+  scheduleReconcile(userId);
+}
+
+export async function deleteBillReminder(billId: string): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const b = await billReminders().find(billId);
+    userId = b.userId;
+    await b.markAsDeleted();
+  });
+  syncInBackground();
+  await cancelScheduledForEntity(billId);
+  scheduleReconcile(userId);
+}
+
+export async function upsertMerchantMapping(input: {
+  userId: string;
+  merchantRaw: string;
+  category: string;
+}): Promise<void> {
+  await database.write(async () => {
+    const existing = await merchantMappings()
+      .query(
+        Q.where('user_id', input.userId),
+        Q.where('merchant_raw', input.merchantRaw)
+      )
+      .fetch();
+    if (existing.length > 0) {
+      await existing[0].update((m) => {
+        m.category = input.category;
+      });
+      return;
+    }
+    await merchantMappings().create((m) => {
+      m._raw.id = uuidv4();
+      m.userId = input.userId;
+      m.merchantRaw = input.merchantRaw;
+      m.category = input.category;
+    });
+  });
+  syncInBackground();
+}
+
+// ─── Recurring incomes ──────────────────────────────────────────────────────
+
+export type RecurringCadence = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+/**
+ * Setup: compute the first/next due date for a freshly-created or rescheduled
+ * recurring entry. Keeps the anchor date itself if it's today or in the future;
+ * if the anchor is in the past, rolls forward to the soonest cycle that lands
+ * today or later. Strict `<` ensures an anchor of "today" stays as "due today"
+ * rather than getting pushed to next cycle.
+ */
+export function computeNextDueDate(
+  cadence: RecurringCadence,
+  anchorDate: string,
+  from: Date = new Date()
+): string {
+  const fromDay = from.toISOString().slice(0, 10);
+  const next = new Date(`${anchorDate}T00:00:00`);
+  while (next.toISOString().slice(0, 10) < fromDay) {
+    if (cadence === 'daily') next.setDate(next.getDate() + 1);
+    else if (cadence === 'weekly') next.setDate(next.getDate() + 7);
+    else if (cadence === 'monthly') next.setMonth(next.getMonth() + 1);
+    else next.setFullYear(next.getFullYear() + 1);
+  }
+  return next.toISOString().slice(0, 10);
+}
+
+/**
+ * Mark-paid/received: advance the schedule strictly past `from`. Used after the
+ * user confirms a cycle so the next due date is always the next future cycle,
+ * even when today's cycle had not yet elapsed.
+ */
+export function advanceNextDueDate(
+  cadence: RecurringCadence,
+  anchorDate: string,
+  from: Date = new Date()
+): string {
+  const fromDay = from.toISOString().slice(0, 10);
+  const next = new Date(`${anchorDate}T00:00:00`);
+  while (next.toISOString().slice(0, 10) <= fromDay) {
+    if (cadence === 'daily') next.setDate(next.getDate() + 1);
+    else if (cadence === 'weekly') next.setDate(next.getDate() + 7);
+    else if (cadence === 'monthly') next.setMonth(next.getMonth() + 1);
+    else next.setFullYear(next.getFullYear() + 1);
+  }
+  return next.toISOString().slice(0, 10);
+}
+
+export async function createRecurringIncome(input: {
+  userId: string;
+  title: string;
+  amount: number;
+  accountId?: string;
+  category?: string;
+  cadence: RecurringCadence;
+  anchorDate: string;
+}): Promise<string> {
+  const id = uuidv4();
+  const next = computeNextDueDate(input.cadence, input.anchorDate);
+  await database.write(async () => {
+    await recurringIncomes().create((r) => {
+      r._raw.id = id;
+      r.userId = input.userId;
+      r.title = input.title;
+      r.amount = toCents(input.amount);
+      r.accountId = input.accountId;
+      r.category = input.category;
+      r.cadence = input.cadence;
+      r.anchorDate = input.anchorDate;
+      r.nextDueAt = next;
+      r.isActive = true;
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(input.userId);
+  return id;
+}
+
+export async function updateRecurringIncome(
+  id: string,
+  patch: Partial<{
+    title: string;
+    amount: number;
+    accountId: string | undefined;
+    category: string | undefined;
+    cadence: RecurringCadence;
+    anchorDate: string;
+    isActive: boolean;
+    lastPostedAt: string | undefined;
+  }>
+): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringIncomes().find(id);
+    userId = r.userId;
+    await r.update((rec) => {
+      // Use `in` not `!== undefined` so explicit clears propagate.
+      if ('title' in patch && patch.title !== undefined)
+        rec.title = patch.title;
+      if ('amount' in patch && patch.amount !== undefined)
+        rec.amount = toCents(patch.amount);
+      if ('accountId' in patch) rec.accountId = patch.accountId;
+      if ('category' in patch) rec.category = patch.category;
+      if ('cadence' in patch && patch.cadence !== undefined)
+        rec.cadence = patch.cadence;
+      if ('anchorDate' in patch && patch.anchorDate !== undefined)
+        rec.anchorDate = patch.anchorDate;
+      if ('isActive' in patch && patch.isActive !== undefined)
+        rec.isActive = patch.isActive;
+      if ('lastPostedAt' in patch) rec.lastPostedAt = patch.lastPostedAt;
+      // Keep nextDueAt aligned whenever schedule changes.
+      if (patch.cadence !== undefined || patch.anchorDate !== undefined) {
+        rec.nextDueAt = computeNextDueDate(
+          patch.cadence ?? rec.cadence,
+          patch.anchorDate ?? rec.anchorDate
+        );
+      }
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(userId);
+}
+
+export async function deleteRecurringIncome(id: string): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringIncomes().find(id);
+    userId = r.userId;
+    await r.markAsDeleted();
+  });
+  syncInBackground();
+  await cancelScheduledForEntity(id);
+  scheduleReconcile(userId);
+}
+
+// ─── Recurring bills ────────────────────────────────────────────────────────
+
+export async function createRecurringBill(input: {
+  userId: string;
+  title: string;
+  amount: number;
+  accountId?: string;
+  category?: string;
+  cadence: RecurringCadence;
+  anchorDate: string;
+}): Promise<string> {
+  const id = uuidv4();
+  const next = computeNextDueDate(input.cadence, input.anchorDate);
+  await database.write(async () => {
+    await recurringBills().create((r) => {
+      r._raw.id = id;
+      r.userId = input.userId;
+      r.title = input.title;
+      r.amount = toCents(input.amount);
+      r.accountId = input.accountId;
+      r.category = input.category;
+      r.cadence = input.cadence;
+      r.anchorDate = input.anchorDate;
+      r.nextDueAt = next;
+      r.isActive = true;
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(input.userId);
+  return id;
+}
+
+export async function updateRecurringBill(
+  id: string,
+  patch: Partial<{
+    title: string;
+    amount: number;
+    accountId: string | undefined;
+    category: string | undefined;
+    cadence: RecurringCadence;
+    anchorDate: string;
+    isActive: boolean;
+    lastPaidAt: string | undefined;
+  }>
+): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringBills().find(id);
+    userId = r.userId;
+    await r.update((rec) => {
+      if ('title' in patch && patch.title !== undefined)
+        rec.title = patch.title;
+      if ('amount' in patch && patch.amount !== undefined)
+        rec.amount = toCents(patch.amount);
+      if ('accountId' in patch) rec.accountId = patch.accountId;
+      if ('category' in patch) rec.category = patch.category;
+      if ('cadence' in patch && patch.cadence !== undefined)
+        rec.cadence = patch.cadence;
+      if ('anchorDate' in patch && patch.anchorDate !== undefined)
+        rec.anchorDate = patch.anchorDate;
+      if ('isActive' in patch && patch.isActive !== undefined)
+        rec.isActive = patch.isActive;
+      if ('lastPaidAt' in patch) rec.lastPaidAt = patch.lastPaidAt;
+      if (patch.cadence !== undefined || patch.anchorDate !== undefined) {
+        rec.nextDueAt = computeNextDueDate(
+          patch.cadence ?? rec.cadence,
+          patch.anchorDate ?? rec.anchorDate
+        );
+      }
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(userId);
+}
+
+export async function markRecurringBillPaid(id: string): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringBills().find(id);
+    userId = r.userId;
+    const today = new Date().toISOString().slice(0, 10);
+    const next = advanceNextDueDate(r.cadence, r.anchorDate, new Date());
+    await r.update((rec) => {
+      rec.lastPaidAt = today;
+      rec.nextDueAt = next;
+    });
+  });
+  syncInBackground();
+  // next_due_at advanced — reschedule the reminder for the new occurrence.
+  scheduleReconcile(userId);
+}
+
+export async function deleteRecurringBill(id: string): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringBills().find(id);
+    userId = r.userId;
+    await r.markAsDeleted();
+  });
+  syncInBackground();
+  await cancelScheduledForEntity(id);
+  scheduleReconcile(userId);
+}
+
+export async function markRecurringIncomePosted(id: string): Promise<void> {
+  let userId = '';
+  await database.write(async () => {
+    const r = await recurringIncomes().find(id);
+    userId = r.userId;
+    const today = new Date().toISOString().slice(0, 10);
+    const next = advanceNextDueDate(r.cadence, r.anchorDate, new Date());
+    await r.update((rec) => {
+      rec.lastPostedAt = today;
+      rec.nextDueAt = next;
+    });
+  });
+  syncInBackground();
+  scheduleReconcile(userId);
+}
+
+export async function processRecurringTransaction(
+  item: {
+    id: string;
+    title: string;
+    amount: number;
+    accountId?: string;
+    category?: string;
+  },
+  type: 'bill' | 'income',
+  userId: string
+): Promise<void> {
+  // Without an account we can't post a transaction. Fail loudly so the UI can
+  // tell the user to edit the recurring entry and pick one — previously this
+  // path silently skipped createTransaction while still advancing the cycle,
+  // which looked like "transactions aren't saved" from the user's side.
+  if (!item.accountId) {
+    throw new Error('NO_ACCOUNT');
+  }
+  const today = new Date().toISOString();
+  await createTransaction({
+    userId,
+    accountId: item.accountId,
+    amount: item.amount,
+    type: type === 'bill' ? 'expense' : 'income',
+    category: item.category ?? (type === 'bill' ? 'bills' : 'income'),
+    displayName: item.title,
+    date: today,
+  });
+  if (type === 'bill') {
+    await markRecurringBillPaid(item.id);
+  } else {
+    await markRecurringIncomePosted(item.id);
+  }
+}
