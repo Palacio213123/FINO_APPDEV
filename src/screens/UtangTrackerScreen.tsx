@@ -26,6 +26,7 @@ import { Ionicons } from '@expo/vector-icons';
 import type { RootStackParamList } from '@/navigation/RootNavigator';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import SegmentedTabRow from '../components/SegmentedTabRow';
 import { database } from '@/db';
 import type DebtModel from '@/db/models/Debt';
 import { getLocalDateString } from '@/utils/date';
@@ -55,6 +56,13 @@ interface Debt {
 
 type StatusFilter = 'all' | 'pending' | 'partial' | 'paid';
 type Status = 'pending' | 'partial' | 'paid';
+
+const STATUS_FILTER_ITEMS: { key: StatusFilter; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'partial', label: 'Partial' },
+  { key: 'paid', label: 'Paid' },
+];
 
 const getStatus = (debt: Debt): Status => {
   if (debt.amount_paid <= 0) return 'pending';
@@ -943,43 +951,15 @@ export default function UtangTrackerScreen() {
           </View>
 
           {/* ── Status filter */}
-          <View
-            style={[
-              styles.filterRow,
-              {
-                backgroundColor: isDark ? colors.surfaceSubdued : colors.white,
-                borderColor: colors.border,
-              },
-            ]}
-          >
-            {(['all', 'pending', 'partial', 'paid'] as StatusFilter[]).map(
-              (tab) => {
-                const active = filter === tab;
-                return (
-                  <TouchableOpacity
-                    key={tab}
-                    onPress={() => setFilter(tab)}
-                    activeOpacity={0.7}
-                    style={[
-                      styles.filterTab,
-                      active && { backgroundColor: activeMeta.accent },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.filterTabText,
-                        { color: active ? '#fff' : colors.textSecondary },
-                      ]}
-                    >
-                      {tab === 'all'
-                        ? 'All'
-                        : tab.charAt(0).toUpperCase() + tab.slice(1)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              }
-            )}
-          </View>
+          <SegmentedTabRow
+            items={STATUS_FILTER_ITEMS}
+            activeKey={filter}
+            onSelect={setFilter}
+            colors={colors}
+            isDark={isDark}
+            activeBackgroundColor={activeMeta.accent}
+            activeTextColor="#fff"
+          />
 
           {/* ── Empty state */}
           {filtered.length === 0 && (
@@ -2021,22 +2001,6 @@ const createStyles = (colors: any, isDark: boolean) =>
     },
     dirTabTitle: { fontFamily: 'Nunito_800ExtraBold', fontSize: 13.5 },
     dirTabSub: { fontFamily: 'Inter_400Regular', fontSize: 11, marginTop: 1 },
-
-    // Status filter
-    filterRow: {
-      flexDirection: 'row',
-      borderRadius: 12,
-      padding: 4,
-      borderWidth: StyleSheet.hairlineWidth,
-      gap: 2,
-    },
-    filterTab: {
-      flex: 1,
-      paddingVertical: 9,
-      borderRadius: 9,
-      alignItems: 'center',
-    },
-    filterTabText: { fontFamily: 'Inter_600SemiBold', fontSize: 12 },
 
     // Empty state
     emptyState: { alignItems: 'center', paddingVertical: 44 },

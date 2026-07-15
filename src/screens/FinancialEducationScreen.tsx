@@ -19,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { spacing, radius } from '../constants/theme';
+import SegmentedTabRow from '../components/SegmentedTabRow';
 import {
   FINANCIAL_EDUCATION_TOPICS,
   type EduTopic,
@@ -28,6 +29,11 @@ import {
 // convention) — a bare global key would leak one account's quiz results to
 // the next person signed into a shared/handed-down device.
 const SCORES_STORAGE_KEY_PREFIX = '@fino_edu_quiz_scores';
+
+const topicTabItems = FINANCIAL_EDUCATION_TOPICS.map((t) => ({
+  key: t.id,
+  label: t.tabLabel,
+}));
 
 type ScoresMap = Record<string, { score: number; total: number }>;
 
@@ -152,7 +158,15 @@ export default function FinancialEducationScreen() {
     setSubmittedTopics((prev) => ({ ...prev, [activeTopicId]: false }));
   }, [activeTopicId, activeTopic]);
 
-  const scoreForActive = savedScores[activeTopicId];
+  const rawScoreForActive = savedScores[activeTopicId];
+  // A saved score's `total` was stamped against the quiz's question count at
+  // submit time. If the quiz content is edited later (question added/removed),
+  // an old score's total no longer matches — treat it as stale rather than
+  // display a result that can't be true of the quiz as it exists now.
+  const scoreForActive =
+    rawScoreForActive && rawScoreForActive.total === activeTopic.quiz.length
+      ? rawScoreForActive
+      : undefined;
   // scoreForActive is the single source of truth once submitted — handleSubmit
   // writes it synchronously, so there's no need to re-run the same reduce here.
   const currentScore = submitted ? (scoreForActive?.score ?? 0) : 0;
@@ -201,41 +215,21 @@ export default function FinancialEducationScreen() {
         </View>
       </View>
 
-      <View
-        style={[
-          styles.tabRow,
-          {
-            backgroundColor: isDark ? colors.surfaceSubdued : colors.white,
-            borderColor: colors.border,
-          },
-        ]}
-      >
-        {FINANCIAL_EDUCATION_TOPICS.map((topic) => {
-          const active = topic.id === activeTopicId;
-          return (
-            <TouchableOpacity
-              key={topic.id}
-              onPress={() => setActiveTopicId(topic.id)}
-              activeOpacity={0.7}
-              style={[
-                styles.tab,
-                active && { backgroundColor: colors.primary },
-              ]}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  { color: active ? colors.accentOn : colors.textSecondary },
-                ]}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-              >
-                {topic.tabLabel}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      <SegmentedTabRow
+        items={topicTabItems}
+        activeKey={activeTopicId}
+        onSelect={setActiveTopicId}
+        colors={colors}
+        isDark={isDark}
+        activeBackgroundColor={colors.primary}
+        activeTextColor={colors.accentOn}
+        fontSize={11.5}
+        style={styles.tabRow}
+        // Today's 5 topics fill the row evenly (unchanged look); this only
+        // switches to a horizontally-scrolling strip if more get added later,
+        // so labels never get squeezed illegibly by adjustsFontSizeToFit.
+        scrollable={topicTabItems.length > 5}
+      />
 
       <ScrollView
         style={{ flex: 1 }}
@@ -393,23 +387,8 @@ const createStyles = (colors: any, isDark: boolean) =>
       marginTop: 1,
     },
     tabRow: {
-      flexDirection: 'row',
       marginHorizontal: spacing.screenPadding,
       marginBottom: 16,
-      borderRadius: 12,
-      padding: 4,
-      borderWidth: StyleSheet.hairlineWidth,
-      gap: 2,
-    },
-    tab: {
-      flex: 1,
-      paddingVertical: 9,
-      borderRadius: 9,
-      alignItems: 'center',
-    },
-    tabText: {
-      fontFamily: 'Inter_600SemiBold',
-      fontSize: 11.5,
     },
     body: {
       paddingHorizontal: spacing.screenPadding,
