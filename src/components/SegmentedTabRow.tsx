@@ -6,10 +6,13 @@ import {
   ScrollView,
   StyleSheet,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 export interface SegmentedTabItem<K extends string = string> {
   key: K;
   label: string;
+  /** Optional Ionicons name shown above the label. Omit for a text-only tab. */
+  icon?: keyof typeof Ionicons.glyphMap;
 }
 
 interface SegmentedTabRowProps<K extends string> {
@@ -67,6 +70,14 @@ export default function SegmentedTabRow<K extends string>({
               active && { backgroundColor: activeBackgroundColor },
             ]}
           >
+            {item.icon && (
+              <Ionicons
+                name={item.icon}
+                size={16}
+                color={active ? activeTextColor : colors.textSecondary}
+                style={styles.tabIcon}
+              />
+            )}
             <Text
               style={[
                 styles.tabText,
@@ -115,6 +126,9 @@ const styles = StyleSheet.create({
   tabScrollable: {
     flex: 0,
     paddingHorizontal: 16,
+  },
+  tabIcon: {
+    marginBottom: 2,
   },
   tabText: {
     fontFamily: 'Inter_600SemiBold',
