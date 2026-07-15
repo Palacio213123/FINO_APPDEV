@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create --title 'feat: onboarding flow on first app launch' --body ':*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(grep -l \"react-native-skia\" /Users/tmpl/Documents/FINO/fino/src/screens/onboarding/*.tsx)",
+      "Bash(ls /Users/tmpl/Documents/FINO/fino/supabase/*.sql)",
+      "Bash(git commit:*)",
+      "Bash(python3 -c \"import sys,json; p=json.load\\(sys.stdin\\); deps={**p.get\\('dependencies',{}\\), **p.get\\('devDependencies',{}\\)}; [print\\(k,v\\) for k,v in deps.items\\(\\) if 'share' in k.lower\\(\\) or 'intent' in k.lower\\(\\)]\")",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase --continue)",
+      "Bash(echo \"---eslint exit: $?---\")",
+      "Bash(git -c core.pager=cat diff --stat -- src/screens/ScreenshotScreen.tsx src/screens/BillSplitterScreen.tsx src/intelligence/index.ts scripts/test-brain.ts src/intelligence/ocr/postprocess.ts FINO_INTELLIGENCE_V2.md)",
+      "Bash(git -c core.pager=cat status --porcelain=v1)",
+      "Bash(git -c core.pager=cat ls-files --others --exclude-standard)",
+      "Bash(git -c core.pager=cat diff package.json)",
+      "Bash(git reset *)",
+      "Bash(git -c core.pager=cat status --short)",
+      "Bash(git -c core.pager=cat show --stat --oneline HEAD)",
+      "Bash(git -c core.pager=cat log --oneline -4)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); const d={...p.dependencies}; Object.keys\\(d\\).filter\\(k=>/svg|chart|victory|gifted|skia|sankey|d3|reanimated|moti|gradient/i.test\\(k\\)\\).forEach\\(k=>console.log\\(k, d[k]\\)\\)\")",
+      "Bash(git stash *)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "supabase"
+  ]
+}
