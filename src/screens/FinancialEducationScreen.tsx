@@ -1,4 +1,10 @@
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import React, {
+  useMemo,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+} from 'react';
 import {
   View,
   Text,
@@ -11,14 +17,25 @@ import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../contexts/ThemeContext';
+import { useAuth } from '../contexts/AuthContext';
 import { spacing, radius } from '../constants/theme';
-import { FINANCIAL_EDUCATION_TOPICS } from '../constants/financialEducationContent';
+import {
+  FINANCIAL_EDUCATION_TOPICS,
+  type EduTopic,
+} from '../constants/financialEducationContent';
 
-const SCORES_STORAGE_KEY = '@fino_edu_quiz_scores';
+// Scoped per user (matches ProfileSidebar's `fino_deferred_${userId}_...`
+// convention) — a bare global key would leak one account's quiz results to
+// the next person signed into a shared/handed-down device.
+const SCORES_STORAGE_KEY_PREFIX = '@fino_edu_quiz_scores';
 
 type ScoresMap = Record<string, { score: number; total: number }>;
 
 type AnswersState = (number | null)[];
+
+function emptyAnswers(topic: EduTopic): AnswersState {
+  return new Array(topic.quiz.length).fill(null);
+}
 
 export default function FinancialEducationScreen() {
   const { colors, isDark } = useTheme();
@@ -26,6 +43,11 @@ export default function FinancialEducationScreen() {
   const navigation = useNavigation<any>();
 
   const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
+
+  const { currentUserId } = useAuth();
+  const scoresKey = currentUserId
+    ? `${SCORES_STORAGE_KEY_PREFIX}_${currentUserId}`
+    : null;
 
   const [activeTopicId, setActiveTopicId] = useState(
     FINANCIAL_EDUCATION_TOPICS[0].id
@@ -37,18 +59,51 @@ export default function FinancialEducationScreen() {
     Record<string, boolean>
   >({});
   const [savedScores, setSavedScores] = useState<ScoresMap>({});
+  // Gates the persist effect below so it never fires before the initial load
+  // resolves — writing the empty default state first would wipe out
+  // whatever was already on disk.
+  const scoresLoadedRef = useRef(false);
 
   useEffect(() => {
-    AsyncStorage.getItem(SCORES_STORAGE_KEY).then((raw) => {
-      if (raw) {
-        try {
-          setSavedScores(JSON.parse(raw));
-        } catch {
-          // ignore corrupt cache
+    scoresLoadedRef.current = false;
+    setSavedScores({});
+    if (!scoresKey) return undefined;
+    let cancelled = false;
+    AsyncStorage.getItem(scoresKey)
+      .then((raw) => {
+        if (cancelled) return;
+        if (raw) {
+          try {
+            const stored = JSON.parse(raw) as ScoresMap;
+            // Merge rather than replace: a quiz submitted while this read was
+            // still in flight must not be clobbered by the older on-disk copy.
+            setSavedScores((prev) => ({ ...stored, ...prev }));
+          } catch {
+            // ignore corrupt cache
+          }
         }
+      })
+      .finally(() => {
+        if (!cancelled) scoresLoadedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scoresKey]);
+
+  // Persists whenever scores change, always from the latest committed state
+  // (not a closure snapshot) — this is what actually fixes the race: no
+  // matter when a submission lands relative to the load above, this effect
+  // only ever writes what React currently has, never a stale copy.
+  useEffect(() => {
+    if (!scoresKey || !scoresLoadedRef.current) return;
+    AsyncStorage.setItem(scoresKey, JSON.stringify(savedScores)).catch(
+      (err) => {
+        if (__DEV__)
+          console.warn('[FinancialEducation] failed to persist scores:', err);
       }
-    });
-  }, []);
+    );
+  }, [savedScores, scoresKey]);
 
   const activeTopic = useMemo(
     () =>
@@ -57,9 +112,7 @@ export default function FinancialEducationScreen() {
     [activeTopicId]
   );
 
-  const answers =
-    answersByTopic[activeTopicId] ??
-    new Array(activeTopic.quiz.length).fill(null);
+  const answers = answersByTopic[activeTopicId] ?? emptyAnswers(activeTopic);
   const submitted = !!submittedTopics[activeTopicId];
   const allAnswered = answers.every((a) => a !== null);
 
@@ -67,45 +120,68 @@ export default function FinancialEducationScreen() {
     (questionIndex: number, optionIndex: number) => {
       if (submittedTopics[activeTopicId]) return;
       setAnswersByTopic((prev) => {
-        const current =
-          prev[activeTopicId] ?? new Array(activeTopic.quiz.length).fill(null);
+        const current = prev[activeTopicId] ?? emptyAnswers(activeTopic);
         const next = [...current];
         next[questionIndex] = optionIndex;
         return { ...prev, [activeTopicId]: next };
       });
     },
-    [activeTopicId, activeTopic.quiz.length, submittedTopics]
+    [activeTopicId, activeTopic, submittedTopics]
   );
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(() => {
     const score = activeTopic.quiz.reduce(
       (acc, q, i) => acc + (answers[i] === q.correctIndex ? 1 : 0),
       0
     );
     setSubmittedTopics((prev) => ({ ...prev, [activeTopicId]: true }));
-    const next = {
-      ...savedScores,
+    // Functional update — always merges onto the latest committed state, so
+    // this can never clobber another topic's score no matter how it races
+    // with the initial-load effect above.
+    setSavedScores((prev) => ({
+      ...prev,
       [activeTopicId]: { score, total: activeTopic.quiz.length },
-    };
-    setSavedScores(next);
-    await AsyncStorage.setItem(SCORES_STORAGE_KEY, JSON.stringify(next));
-  }, [activeTopic, activeTopicId, answers, savedScores]);
+    }));
+  }, [activeTopic, activeTopicId, answers]);
 
   const handleRetake = useCallback(() => {
     setAnswersByTopic((prev) => ({
       ...prev,
-      [activeTopicId]: new Array(activeTopic.quiz.length).fill(null),
+      [activeTopicId]: emptyAnswers(activeTopic),
     }));
     setSubmittedTopics((prev) => ({ ...prev, [activeTopicId]: false }));
-  }, [activeTopicId, activeTopic.quiz.length]);
+  }, [activeTopicId, activeTopic]);
 
   const scoreForActive = savedScores[activeTopicId];
-  const currentScore = submitted
-    ? activeTopic.quiz.reduce(
-        (acc, q, i) => acc + (answers[i] === q.correctIndex ? 1 : 0),
-        0
-      )
-    : 0;
+  // scoreForActive is the single source of truth once submitted — handleSubmit
+  // writes it synchronously, so there's no need to re-run the same reduce here.
+  const currentScore = submitted ? (scoreForActive?.score ?? 0) : 0;
+
+  const getOptionVisual = (
+    isSubmitted: boolean,
+    isSelected: boolean,
+    isCorrect: boolean
+  ): { style: object; textColor: string } => {
+    if (isSubmitted && isCorrect) {
+      return {
+        style: { ...styles.option, ...styles.optionCorrect },
+        textColor: colors.incomeGreen,
+      };
+    }
+    if (isSubmitted && isSelected) {
+      return {
+        style: { ...styles.option, ...styles.optionWrong },
+        textColor: colors.expenseRed,
+      };
+    }
+    if (!isSubmitted && isSelected) {
+      return {
+        style: { ...styles.option, ...styles.optionSelected },
+        textColor: colors.textPrimary,
+      };
+    }
+    return { style: styles.option, textColor: colors.textPrimary };
+  };
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -196,19 +272,11 @@ export default function FinancialEducationScreen() {
             {q.options.map((opt, oi) => {
               const selected = answers[qi] === oi;
               const isCorrect = oi === q.correctIndex;
-              let optionStyle = styles.option;
-              let textColor = colors.textPrimary;
-              if (submitted) {
-                if (isCorrect) {
-                  optionStyle = { ...styles.option, ...styles.optionCorrect };
-                  textColor = colors.incomeGreen;
-                } else if (selected && !isCorrect) {
-                  optionStyle = { ...styles.option, ...styles.optionWrong };
-                  textColor = colors.expenseRed;
-                }
-              } else if (selected) {
-                optionStyle = { ...styles.option, ...styles.optionSelected };
-              }
+              const { style: optionStyle, textColor } = getOptionVisual(
+                submitted,
+                selected,
+                isCorrect
+              );
               return (
                 <TouchableOpacity
                   key={oi}
