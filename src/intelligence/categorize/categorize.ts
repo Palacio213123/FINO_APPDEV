@@ -541,6 +541,11 @@ const DISPLAY_STOP_WORDS = new Set<string>([
   'about', 'above', 'after', 'before', 'between', 'by', 'during',
   'inside', 'near', 'over', 'since', 'through', 'under', 'until', 'upon',
   'within', 'without', 'around', 'against',
+  // Payment/account trigger words (ACCOUNT_TRIGGER_WORDS) — must never
+  // survive into the item description even when no account is actually
+  // detected (e.g. "jollibee worth 500 using gcash" with no GCash account
+  // registered would otherwise leave "using" dangling as a fake item).
+  'via', 'using', 'thru', 'mula', 'transferred', 'sent',
   // Tagalog / Filipino
   'na', 'ng', 'mga', 'ang', 'ako', 'ko', 'sa', 'kay', 'din', 'rin',
   'lang', 'po', 'opo', 'ay', 'ito', 'iyon', 'siya', 'kami', 'kayo', 'sila',
@@ -560,6 +565,7 @@ const DISPLAY_STOP_WORDS = new Set<string>([
   'spent', 'spend', 'bought', 'buy', 'paid', 'pay', 'paying',
   'ate', 'eat', 'eats', 'eating', 'got', 'gets', 'getting', 'have',
   'had', 'has', 'order', 'ordered', 'ordering', 'used',
+  'worth', 'cost', 'costs', 'costing', 'amounting',
   'kain', 'kumain', 'kakain', 'mag-kain', 'magkain',
   'kaon', 'mikaon', 'mokaon', 'mukaon', 'nagkaon', 'kumakain',
   'bumili', 'bili', 'mipalit', 'palit', 'mopalit', 'pumalit',

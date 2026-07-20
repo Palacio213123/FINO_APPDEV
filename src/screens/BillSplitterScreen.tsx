@@ -671,10 +671,21 @@ export default function BillSplitterScreen() {
     const totals: Record<string, number> = {};
     people.forEach((p) => { totals[p.id] = 0; });
     items.forEach((item) => {
-      const unitPrice = item.price / item.quantity;
-      Object.entries(item.assignees).forEach(([personId, qty]) => {
-        if (qty > 0) totals[personId] = (totals[personId] ?? 0) + unitPrice * qty;
-      });
+      const participants = Object.entries(item.assignees).filter(([, qty]) => qty > 0);
+      if (participants.length === 0) return;
+      if (item.quantity > 1) {
+        // Multi-quantity item: each unit is exclusively owned by whoever holds it.
+        const unitPrice = item.price / item.quantity;
+        participants.forEach(([personId, qty]) => {
+          totals[personId] = (totals[personId] ?? 0) + unitPrice * qty;
+        });
+      } else {
+        // Single item shared by everyone tapped on it: split the price evenly.
+        const share = item.price / participants.length;
+        participants.forEach(([personId]) => {
+          totals[personId] = (totals[personId] ?? 0) + share;
+        });
+      }
     });
     return totals;
   }, [items, people]);
@@ -682,9 +693,13 @@ export default function BillSplitterScreen() {
   const unassignedTotal = useMemo(
     () =>
       items.reduce((sum, item) => {
-        const assignedQty = Object.values(item.assignees).reduce((s, q) => s + q, 0);
-        const unassignedQty = Math.max(0, item.quantity - assignedQty);
-        return sum + (item.price / item.quantity) * unassignedQty;
+        if (item.quantity > 1) {
+          const assignedQty = Object.values(item.assignees).reduce((s, q) => s + q, 0);
+          const unassignedQty = Math.max(0, item.quantity - assignedQty);
+          return sum + (item.price / item.quantity) * unassignedQty;
+        }
+        const hasParticipant = Object.values(item.assignees).some((q) => q > 0);
+        return sum + (hasParticipant ? 0 : item.price);
       }, 0),
     [items]
   );
