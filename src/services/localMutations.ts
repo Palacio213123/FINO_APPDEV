@@ -587,9 +587,8 @@ export async function updateDebt(
       | 'totalAmount'
       | 'amountPaid'
       | 'direction'
-      | 'dueDate'
     >
-  >
+  > & { dueDate?: string | null }
 ): Promise<void> {
   await database.write(async () => {
     const d = await debts().find(debtId);
@@ -601,7 +600,10 @@ export async function updateDebt(
       if (patch.amountPaid !== undefined)
         rec.amountPaid = toCents(patch.amountPaid);
       if (patch.direction !== undefined) rec.direction = patch.direction;
-      if (patch.dueDate !== undefined) rec.dueDate = patch.dueDate;
+      // `dueDate` uses presence-of-key, not !== undefined, so passing
+      // `dueDate: null` explicitly clears it — omitting the key leaves it
+      // untouched (unlike every other field here, this one is user-clearable).
+      if ('dueDate' in patch) rec.dueDate = patch.dueDate ?? undefined;
     });
   });
   syncInBackground();

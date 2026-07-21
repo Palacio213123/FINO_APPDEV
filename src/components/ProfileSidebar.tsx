@@ -20,9 +20,6 @@ import {
   Modal,
   ScrollView,
   Dimensions,
-  KeyboardAvoidingView,
-  Platform,
-  TextInput,
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
@@ -213,11 +210,7 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
   const [deferredIds, setDeferredIds] = useState<Set<string>>(new Set());
 
   const [showSettings, setShowSettings] = useState(false);
-  const [showLogin, setShowLogin] = useState(false);
   const [showAddAccount, setShowAddAccount] = useState(false);
-  const [loginEmail, setLoginEmail] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
 
@@ -376,32 +369,12 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
     ]);
   };
 
-  const handleLogin = async () => {
-    if (!loginEmail.trim() || !loginPassword) {
-      Alert.alert('Required', 'Enter your email and password.');
-      return;
-    }
-    setIsLoggingIn(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email: loginEmail.trim(),
-      password: loginPassword,
-    });
-    setIsLoggingIn(false);
-    if (error) {
-      Alert.alert('Login failed', error.message);
-      return;
-    }
-    setShowLogin(false);
-    setLoginPassword('');
-    supabase.auth.getUser().then(({ data }) => {
-      const email = data.user?.email ?? null;
-      setAuthEmail(email);
-      if (email) {
-        const raw = email.split('@')[0].replace(/[._]/g, ' ');
-        setUserName(raw.charAt(0).toUpperCase() + raw.slice(1));
-        setUserInitial(email.charAt(0).toUpperCase());
-      }
-    });
+  // Opens the full Auth screen (Sign In / Sign Up toggle, Google, Apple) —
+  // this sidebar used to show its own email/password-only login modal, which
+  // had no way to create an account or use Apple/Google sign-in.
+  const openLogin = () => {
+    onClose();
+    setTimeout(() => navigation.navigate('Auth'), 260);
   };
 
   const handleDeferItem = useCallback(
@@ -478,7 +451,7 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
             <View style={styles.profileRow}>
               <TouchableOpacity
                 style={styles.avatarWrap}
-                onPress={() => !authEmail && setShowLogin(true)}
+                onPress={() => !authEmail && openLogin()}
               >
                 <LinearGradient
                   colors={[colors.primary, colors.primaryDark]}
@@ -496,7 +469,7 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
                     {authEmail}
                   </Text>
                 ) : (
-                  <TouchableOpacity onPress={() => setShowLogin(true)}>
+                  <TouchableOpacity onPress={openLogin}>
                     <Text
                       style={[styles.profileEmail, { color: colors.primary }]}
                     >
@@ -1172,7 +1145,7 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
             ) : (
               <TouchableOpacity
                 style={styles.signOutRow}
-                onPress={() => setShowLogin(true)}
+                onPress={openLogin}
                 activeOpacity={0.7}
               >
                 <View
@@ -1526,116 +1499,6 @@ export default function ProfileSidebar({ visible, onClose }: Props) {
             </View>
           </View>
         </ScrollView>
-      </Modal>
-
-      {/* Login Modal */}
-      <Modal
-        visible={showLogin}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowLogin(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1, backgroundColor: colors.white }}
-        >
-          <View
-            style={{ paddingTop: 12, paddingHorizontal: spacing.screenPadding }}
-          >
-            <View
-              style={{
-                width: 36,
-                height: 4,
-                backgroundColor: colors.border,
-                borderRadius: 2,
-                alignSelf: 'center',
-                marginBottom: 16,
-              }}
-            />
-            <View
-              style={{
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 28,
-              }}
-            >
-              <Text
-                style={{
-                  fontFamily: 'Nunito_800ExtraBold',
-                  fontSize: 22,
-                  color: colors.textPrimary,
-                }}
-              >
-                Log in
-              </Text>
-              <TouchableOpacity
-                onPress={() => setShowLogin(false)}
-                style={{ padding: 8 }}
-              >
-                <Ionicons name="close" size={22} color={colors.textSecondary} />
-              </TouchableOpacity>
-            </View>
-            <TextInput
-              style={{
-                borderWidth: 1,
-                borderColor: colors.border,
-                borderRadius: 12,
-                padding: 14,
-                fontFamily: 'Inter_400Regular',
-                fontSize: 15,
-                color: colors.textPrimary,
-                marginBottom: 12,
-                backgroundColor: colors.white,
-              }}
-              placeholder="Email"
-              placeholderTextColor={colors.textSecondary}
-              value={loginEmail}
-              onChangeText={setLoginEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-            />
-            <TextInput
-              style={{
-                borderWidth: 1,
-                borderColor: colors.border,
-                borderRadius: 12,
-                padding: 14,
-                fontFamily: 'Inter_400Regular',
-                fontSize: 15,
-                color: colors.textPrimary,
-                marginBottom: 24,
-                backgroundColor: colors.white,
-              }}
-              placeholder="Password"
-              placeholderTextColor={colors.textSecondary}
-              value={loginPassword}
-              onChangeText={setLoginPassword}
-              secureTextEntry
-            />
-            <TouchableOpacity
-              onPress={handleLogin}
-              disabled={isLoggingIn}
-              style={{
-                backgroundColor: colors.primary,
-                borderRadius: 14,
-                padding: 16,
-                alignItems: 'center',
-                opacity: isLoggingIn ? 0.6 : 1,
-              }}
-            >
-              <Text
-                style={{
-                  fontFamily: 'Inter_700Bold',
-                  fontSize: 15,
-                  color: '#fff',
-                }}
-              >
-                {isLoggingIn ? 'Logging in…' : 'Log in'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
       </Modal>
     </Modal>
   );

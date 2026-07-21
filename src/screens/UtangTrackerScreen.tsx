@@ -433,6 +433,7 @@ function CalendarModal({
   isDark,
   onCancel,
   onApply,
+  onClear,
 }: {
   visible: boolean;
   initialDate: string;
@@ -440,6 +441,7 @@ function CalendarModal({
   isDark: boolean;
   onCancel: () => void;
   onApply: (date: string) => void;
+  onClear?: () => void;
 }) {
   const [tempDate, setTempDate] = useState(
     initialDate || getLocalDateString(new Date())
@@ -517,6 +519,29 @@ function CalendarModal({
                 Cancel
               </Text>
             </Pressable>
+            {onClear && (
+              <Pressable
+                onPress={onClear}
+                style={{
+                  flex: 1,
+                  height: 46,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: isDark ? colors.surfaceSubdued : '#F4F4F8',
+                }}
+              >
+                <Text
+                  style={{
+                    fontFamily: 'Inter_600SemiBold',
+                    fontSize: 14,
+                    color: '#EF4444',
+                  }}
+                >
+                  Clear
+                </Text>
+              </Pressable>
+            )}
             <Pressable
               onPress={() => onApply(tempDate)}
               style={{
@@ -570,25 +595,38 @@ export default function UtangTrackerScreen() {
     const query = database
       .get<DebtModel>('debts')
       .query(Q.where('user_id', userId), Q.sortBy('updated_at', Q.desc));
-    const sub = query.observe().subscribe((records) => {
-      const raws = records.map((r) => {
-        const raw = r._raw as Record<string, unknown>;
-        return {
-          id: r.id,
-          debtor_name: r.debtorName,
-          description: r.description ?? null,
-          total_amount: r.totalAmount,
-          amount_paid: r.amountPaid,
-          direction: (r.direction === 'i_owe'
-            ? 'i_owe'
-            : 'owed_to_me') as Direction,
-          due_date: r.dueDate ?? null,
-          created_at: (raw.server_created_at as string) ?? '',
-        } as Debt;
+    // observeWithColumns (not observe()) so edits to an existing record —
+    // recording a payment, changing the due date — re-emit the list. Plain
+    // observe() only fires when records are added/removed from the result
+    // set, not when a matching record's fields change in place.
+    const sub = query
+      .observeWithColumns([
+        'debtor_name',
+        'description',
+        'total_amount',
+        'amount_paid',
+        'direction',
+        'due_date',
+      ])
+      .subscribe((records) => {
+        const raws = records.map((r) => {
+          const raw = r._raw as Record<string, unknown>;
+          return {
+            id: r.id,
+            debtor_name: r.debtorName,
+            description: r.description ?? null,
+            total_amount: r.totalAmount,
+            amount_paid: r.amountPaid,
+            direction: (r.direction === 'i_owe'
+              ? 'i_owe'
+              : 'owed_to_me') as Direction,
+            due_date: r.dueDate ?? null,
+            created_at: (raw.server_created_at as string) ?? '',
+          } as Debt;
+        });
+        setDebts(raws);
+        setLoading(false);
       });
-      setDebts(raws);
-      setLoading(false);
-    });
     return () => sub.unsubscribe();
   }, [userId]);
 
@@ -606,6 +644,10 @@ export default function UtangTrackerScreen() {
     direction: 'owed_to_me' as Direction,
   });
   const [showCalendar, setShowCalendar] = useState(false);
+  // Editing the due date of an existing debt from the Detail modal —
+  // separate from `showCalendar` (used by the Add form) so the two pickers
+  // don't fight over state.
+  const [showDetailCalendar, setShowDetailCalendar] = useState(false);
 
   const openAdd = (forceDir?: Direction) => {
     setAddForm({
@@ -762,6 +804,24 @@ export default function UtangTrackerScreen() {
       );
     } finally {
       setPayLoading(false);
+    }
+  };
+
+  // ── Edit due date (Detail modal — debts had no way to change this after
+  // creation, only when first adding the record)
+  const submitDueDate = async (date: string) => {
+    if (!detail) return;
+    const targetId = detail.id;
+    setShowDetailCalendar(false);
+    setDetail((prev) => (prev ? { ...prev, due_date: date || null } : null));
+
+    try {
+      await localUpdateDebt(targetId, { dueDate: date || null });
+    } catch (err) {
+      Alert.alert(
+        'Save failed',
+        err instanceof Error ? err.message : 'Please try again.'
+      );
     }
   };
 
@@ -1472,6 +1532,17 @@ export default function UtangTrackerScreen() {
         }}
       />
 
+      {/* Due-date editor for an existing debt, opened from the Detail modal */}
+      <CalendarModal
+        visible={showDetailCalendar}
+        initialDate={detail?.due_date || getLocalDateString(new Date())}
+        colors={colors}
+        isDark={isDark}
+        onCancel={() => setShowDetailCalendar(false)}
+        onApply={submitDueDate}
+        onClear={() => submitDueDate('')}
+      />
+
       {/* ──────────────────────────────────────────────────────────────────── */}
       {/* RECORD PAYMENT MODAL */}
       {/* ──────────────────────────────────────────────────────────────────── */}
@@ -1792,37 +1863,62 @@ export default function UtangTrackerScreen() {
                         value: fmtDate(detail.due_date ?? detail.created_at),
                         color: overdue ? '#EF4444' : colors.textPrimary,
                       },
-                    ].map((item, i) => (
-                      <View
-                        key={i}
-                        style={[
-                          styles.detailGridCell,
-                          {
-                            borderRightColor: colors.border,
-                            borderBottomColor: colors.border,
-                          },
-                          i % 2 === 1 && { borderRightWidth: 0 },
-                          i >= 2 && { borderBottomWidth: 0 },
-                        ]}
-                      >
-                        <Text
+                    ].map((item, i) => {
+                      const isDueDateCell = i === 3;
+                      const Cell = isDueDateCell ? TouchableOpacity : View;
+                      return (
+                        <Cell
+                          key={i}
+                          onPress={
+                            isDueDateCell
+                              ? () => setShowDetailCalendar(true)
+                              : undefined
+                          }
+                          activeOpacity={isDueDateCell ? 0.7 : 1}
                           style={[
-                            styles.detailGridLabel,
-                            { color: colors.textSecondary },
+                            styles.detailGridCell,
+                            {
+                              borderRightColor: colors.border,
+                              borderBottomColor: colors.border,
+                            },
+                            i % 2 === 1 && { borderRightWidth: 0 },
+                            i >= 2 && { borderBottomWidth: 0 },
                           ]}
                         >
-                          {item.label}
-                        </Text>
-                        <Text
-                          style={[
-                            styles.detailGridValue,
-                            { color: item.color },
-                          ]}
-                        >
-                          {item.value}
-                        </Text>
-                      </View>
-                    ))}
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 4,
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.detailGridLabel,
+                                { color: colors.textSecondary },
+                              ]}
+                            >
+                              {item.label}
+                            </Text>
+                            {isDueDateCell && (
+                              <Ionicons
+                                name="pencil-outline"
+                                size={11}
+                                color={colors.textSecondary}
+                              />
+                            )}
+                          </View>
+                          <Text
+                            style={[
+                              styles.detailGridValue,
+                              { color: item.color },
+                            ]}
+                          >
+                            {item.value}
+                          </Text>
+                        </Cell>
+                      );
+                    })}
                   </View>
 
                   {/* Actions */}
